@@ -1,8 +1,10 @@
 import os
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
 from typing import List, Optional
+import requests
 
 from database import db, create_document, get_documents
 from schemas import Product, Message
@@ -114,6 +116,39 @@ def contact(data: ContactRequest):
         return {"status": "ok", "id": _id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/proxy-image")
+def proxy_image(url: str = Query(..., description="Absolute image URL to proxy")):
+    """Proxy external images to avoid hotlink protection, CORS/referrer issues.
+    Adds simple caching headers.
+    """
+    try:
+        if not (url.startswith("http://") or url.startswith("https://")):
+            raise HTTPException(status_code=400, detail="Invalid URL")
+        # Fetch the image
+        resp = requests.get(url, stream=True, timeout=10, headers={
+            "User-Agent": "momtobe-proxy/1.0 (+https://example.com)",
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+            "Referer": ""
+        })
+        content_type = resp.headers.get("Content-Type", "image/jpeg")
+        if not resp.ok:
+            raise HTTPException(status_code=404, detail="Image not found")
+
+        def iter_content():
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk:
+                    yield chunk
+        headers = {
+            "Cache-Control": "public, max-age=86400",
+            "Access-Control-Allow-Origin": "*",
+        }
+        return StreamingResponse(iter_content(), media_type=content_type, headers=headers)
+    except HTTPException:
+        raise
+    except Exception as e:
+        return Response(status_code=502, content=str(e))
 
 
 @app.get("/test")
